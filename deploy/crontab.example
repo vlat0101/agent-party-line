@@ -1,0 +1,12 @@
+# Intake: the only thing on a timer. Token-free on a quiet tick.
+# Anything it prints is an escalation, so whatever reads cron mail is your alert channel.
+#
+# Install with:  sudo crontab -u partyline -e    (paste the line below)
+# Add MAILTO=you@example.com at the top to get the escalations by mail.
+
+* * * * * . /etc/partyline/config.env && /usr/bin/python3 /opt/partyline/intake/collect.py
+
+# Notes
+#  * one minute, not five: the poll is cheap, and latency is what your peer notices
+#  * the collector takes a flock, so a slow tick cannot overlap the next one
+#  * keep it no_agent (a script). Never let the poll become a model call.

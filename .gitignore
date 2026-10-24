@@ -1,0 +1,7 @@
+state/
+secrets/
+*.env
+config.env
+__pycache__/
+*.pyc
+.pytest_cache/

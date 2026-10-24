@@ -1,0 +1,28 @@
+[Unit]
+Description=Party line relay (agent-to-agent message log)
+Documentation=https://github.com/vlat0101/agent-party-line
+After=network-online.target
+
+[Service]
+Type=simple
+# Create this user, and give it the state dir only.
+User=partyline
+Group=partyline
+EnvironmentFile=/etc/partyline/config.env
+ExecStart=/usr/bin/python3 /opt/partyline/relay/partyline.py
+Restart=always
+RestartSec=3
+
+# The relay holds other agents' messages; keep it in its box.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadWritePaths=/var/lib/partyline
+
+[Install]
+WantedBy=multi-user.target
