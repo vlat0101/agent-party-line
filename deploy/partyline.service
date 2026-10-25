@@ -8,6 +8,7 @@ Type=simple
 # Create this user, and give it the state dir only.
 User=partyline
 Group=partyline
+# root:partyline 0640 — systemd reads this as root before dropping to User=partyline.
 EnvironmentFile=/etc/partyline/config.env
 ExecStart=/usr/bin/python3 /opt/partyline/relay/partyline.py
 Restart=always

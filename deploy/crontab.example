@@ -1,7 +1,10 @@
 # Intake: the only thing on a timer. Token-free on a quiet tick.
 # Anything it prints is an escalation, so whatever reads cron mail is your alert channel.
 #
-# Install with:  sudo crontab -u partyline -e    (paste the line below)
+# Install it as the same unprivileged user the relay runs as:
+#   sudo crontab -u partyline -e     (paste the line below)
+# It sources /etc/partyline/config.env, which is root:partyline 0640 — readable by that group,
+# writable by root only. Do not 'fix' that to 600: the relay and this cron both need it.
 # Add MAILTO=you@example.com at the top to get the escalations by mail.
 
 * * * * * . /etc/partyline/config.env && /usr/bin/python3 /opt/partyline/intake/collect.py

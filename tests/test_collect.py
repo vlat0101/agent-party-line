@@ -47,7 +47,7 @@ class Intake(unittest.TestCase):
         return f"{sys.executable} {path}"
 
     def run_collect(self, *, allowed="agent-b", classifier: str | None = None,
-                    hook: bool = True) -> subprocess.CompletedProcess:
+                    hook: bool = True, extra: dict | None = None) -> subprocess.CompletedProcess:
         env = dict(os.environ,
                    RELAY_URL=self.relay.url, ME="agent-a", RELAY_TOKEN="key-a-0123456789",
                    ALLOWED_SENDERS=allowed, STATE_DIR=self.state)
@@ -58,6 +58,7 @@ class Intake(unittest.TestCase):
         if hook:
             env["WEBHOOK_URL"] = self.hook.url
             env["WEBHOOK_SECRET"] = self.secret
+        env.update(extra or {})
         return subprocess.run([sys.executable, COLLECT], env=env, capture_output=True,
                               text=True, timeout=120)
 
@@ -112,6 +113,38 @@ class Intake(unittest.TestCase):
         # Both messages are queued; the second wake is held back by WAKE_MIN_GAP, not dropped.
         self.assertEqual(len(self.pending()), 2)
         self.assertEqual(len(self.hook.calls), 1)
+
+    def test_a_burst_larger_than_max_per_run_loses_nothing(self):
+        """Regression: the cursor used to jump to the batch max, silently dropping messages."""
+        sent = [self.relay.say("agent-b", f"question {i}?", thread=f"b{i}")[1]["id"] for i in range(15)]
+        env_extra = {"MAX_PER_RUN": "12"}
+        first = self.run_collect(classifier=self.stub("work.py", WORK_STUB), extra=env_extra)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.run_collect(classifier=self.stub("work.py", WORK_STUB), extra=env_extra)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(sorted(m["id"] for m in self.pending()), sent)
+
+    def test_bad_key_is_loud_not_a_quiet_tick(self):
+        self.relay.say("agent-b", "anything?")
+        r = subprocess.run([sys.executable, COLLECT], capture_output=True, text=True, timeout=60,
+                           env=dict(os.environ, RELAY_URL=self.relay.url, ME="agent-a",
+                                    RELAY_TOKEN="wrong-key", ALLOWED_SENDERS="agent-b",
+                                    STATE_DIR=self.state, CLASSIFIER_CMD=self.stub("work.py", WORK_STUB)))
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("HTTP 401", r.stdout)
+        self.assertIn("check the key", r.stdout)
+
+    def test_webhook_failure_falls_back_and_says_so(self):
+        self.relay.say("agent-b", "needs an answer?", thread="w")
+        env = dict(os.environ, RELAY_URL=self.relay.url, ME="agent-a",
+                   RELAY_TOKEN="key-a-0123456789", ALLOWED_SENDERS="agent-b", STATE_DIR=self.state,
+                   CLASSIFIER_CMD=self.stub("work.py", WORK_STUB),
+                   WEBHOOK_URL="http://127.0.0.1:1/nope",       # nothing listens there
+                   FAIL_ALERT_AFTER="1")
+        r = subprocess.run([sys.executable, COLLECT], capture_output=True, text=True, timeout=90, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("could not be woken", r.stdout)
+        self.assertEqual(len(self.pending()), 1, "a failed wake must not lose the message")
 
     def test_quiet_tick_prints_nothing(self):
         r = self.run_collect(classifier=self.stub("work.py", WORK_STUB))

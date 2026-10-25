@@ -16,8 +16,9 @@ Per tick:
      that it is parked, and change nothing. Short risk-free text with no question is chatter: dropped.
   5. work -> append to the pending queue, then wake the agent with a signed webhook POST, paced.
 
-Output contract: empty stdout on a quiet tick (no delivery). Exit status is always 0 — the delivery is
-the alert, not the exit code.
+Output contract: empty stdout on a quiet tick (no delivery). Exit status is 0 for every outcome that a
+cron job should not treat as a crash — including relay and webhook failures, which are reported on stdout.
+The single exception is a missing ME, which is a configuration error and exits 2.
 
 Everything estate-specific lives in the environment; see config.env.example.
 """
@@ -261,22 +262,45 @@ def main() -> int:
 
     cursor = read_cursor()
     try:
-        data = api(f"/since?id={cursor}&for={ME}", timeout=20)
+        data = api(f"/since?id={cursor}", timeout=20)
+    except urllib.error.HTTPError as exc:
+        # 401/403/429 are configuration problems, not a quiet line. Say so out loud or the
+        # messages pile up on the relay while every tick looks like nothing happened.
+        body = ""
+        try:
+            body = exc.read().decode(errors="replace")[:200]
+        except Exception:  # noqa: BLE001 - best effort only
+            pass
+        log(f"relay returned {exc.code}: {body}")
+        hint = ("check the key in TOKEN_FILE" if exc.code in (401, 403)
+                else "relay is rate limiting or unavailable" if exc.code == 429
+                else "relay rejected the request")
+        print(f"⚠️ party line intake: relay answered HTTP {exc.code} at {RELAY_URL} — {hint}\n"
+              f"{body}\nNothing was read this tick; messages stay on the relay.")
+        return 0
     except (urllib.error.URLError, OSError, ValueError) as exc:
         log(f"relay unreachable: {exc}")
+        print(f"⚠️ party line intake: relay unreachable at {RELAY_URL} — {exc}\n"
+              f"Nothing was read this tick; messages stay on the relay.")
         return 0
 
     all_msgs = data.get("messages", [])
     msgs = [m for m in all_msgs if m.get("from") != ME]
-    top = max([m["id"] for m in all_msgs] or [cursor])
+    top = max([m.get("id", 0) for m in all_msgs] or [cursor])
     if not msgs:
         write_cursor(top)
         return 0
 
+    # The cursor may only advance past messages actually handled this tick. Advancing it to the
+    # highest id in the batch would silently skip everything past MAX_PER_RUN, and the relay does
+    # not replay: that traffic is gone, unclassified and unalerted.
+    batch = msgs[:MAX_PER_RUN]
+    last_id = batch[-1].get("id", cursor)
+
     escalations: list[str] = []
     work: list[dict] = []
 
-    for m in msgs[:MAX_PER_RUN]:
+    for m in batch:
         text = (m.get("text") or "")[:MAX_TEXT]
         sender = str(m.get("from") or "?")
 
@@ -317,8 +341,21 @@ def main() -> int:
             escalations.append(
                 f"⚠️ {len(work)} work message(s) queued but the agent could not be woken "
                 f"(webhook and fallback both failed). They stay in {PENDING_FILE} for the next tick.")
+        elif how in ("webhook", "paced"):
+            fails = 0
+            try:
+                with open(WEBHOOK_FAIL_FILE) as f:
+                    fails = int(f.read().strip() or 0)
+            except (OSError, ValueError):
+                pass
+            # The fallback is still delivering, so this is a health signal, not a silence: say it
+            # once at the threshold rather than every tick for hours.
+            if fails == FAIL_ALERT_AFTER and how == "webhook":
+                escalations.append(
+                    f"⚠️ webhook wake has failed {fails} times recently and the fallback was used; "
+                    f"check the receiver before it is the only thing waking the agent.")
 
-    write_cursor(top)
+    write_cursor(last_id if last_id else top)
     if escalations:
         print("\n\n".join(escalations))
     return 0

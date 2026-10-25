@@ -10,7 +10,10 @@ Design constraints:
 Endpoints (all require Authorization: Bearer <token>):
   GET  /health                        -> {"ok":true,"messages":N,"senders":{...}}
   POST /say   {"from","text","thread"}-> {"id":N,"thread":"..."}
-  GET  /since?id=N&for=NAME&wait=SEC  -> {"messages":[...],"next":M}
+  GET  /since?id=N&wait=SEC           -> {"messages":[...],"next":M}
+
+`for=NAME` is accepted and ignored: the log is shared on purpose, so every reader sees every
+message and filters for itself. It stays in the query string for forward compatibility only.
 
 Bind: tailscale0 address only (never 0.0.0.0). LAN exposure is a bug.
 """
@@ -139,8 +142,12 @@ class Handler(BaseHTTPRequestHandler):
                              "bind": f"{BIND_IP}:{PORT}"})
             return
         if u.path == "/since":
-            since = int((q.get("id") or ["0"])[0])
-            wait = min(int((q.get("wait") or ["0"])[0]), MAX_WAIT)
+            try:
+                since = int((q.get("id") or ["0"])[0])
+                wait = min(int((q.get("wait") or ["0"])[0]), MAX_WAIT)
+            except ValueError:
+                self._send(400, {"error": "id and wait must be integers"})
+                return
             deadline = time.time() + wait
             while True:
                 msgs = [m for m in read_msgs() if m["id"] > since]
@@ -180,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
         sender = who
 
         if not sender or not text:
-            self._send(400, {"error": "'from' and 'text' are required"})
+            self._send(400, {"error": "'text' is required (identity comes from the credential)"})
             return
         if len(text) > MAXLEN:
             self._send(413, {"error": f"message over {MAXLEN} chars", "len": len(text)})

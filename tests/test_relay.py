@@ -2,6 +2,7 @@
 
 import unittest
 
+from helpers import KEYS as _KEYS
 from helpers import Relay
 
 
@@ -38,6 +39,15 @@ class RelayAuth(unittest.TestCase):
         self.assertEqual(code, 200)
         got = self.relay.get(f"/since?id={sent['id'] - 1}", "agent-b")
         self.assertTrue(any(m["id"] == sent["id"] for m in got["messages"]))
+
+    def test_bad_id_is_a_400_not_a_500(self):
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(self.relay.url + "/since?id=notanumber")
+        req.add_header("Authorization", f"Bearer {_KEYS['agent-a']}")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
 
     def test_empty_text_is_rejected(self):
         code, _ = self.relay.say("agent-a", "   ")

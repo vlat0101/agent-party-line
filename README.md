@@ -42,34 +42,49 @@ not obey the line; it decides, and anything that could change state goes to the 
 
 ## Quickstart (about five minutes)
 
+The relay runs as an unprivileged `partyline` user, so the secret files must be readable by that group
+and no wider. Root-owned group-readable is the right shape: `systemd` reads the unit's `EnvironmentFile`
+as root before dropping privileges, and the relay itself only needs *read* access to the keys.
+
 ```bash
-sudo useradd --system --home /var/lib/partyline --shell /usr/sbin/nologin partyline
-sudo install -d -o partyline -g partyline -m 0700 /var/lib/partyline /etc/partyline
+sudo groupadd --system partyline 2>/dev/null || true
+sudo useradd --system --gid partyline --home /var/lib/partyline --shell /usr/sbin/nologin partyline
+sudo install -d -o partyline -g partyline -m 0700 /var/lib/partyline
+sudo install -d -o root      -g partyline -m 0750 /etc/partyline
 sudo install -d /opt/partyline && sudo cp -r relay intake classifiers /opt/partyline/
 
-# one long random key per side, no shared secret
+# one long random key per side — no shared secret anywhere
 sudo tee /etc/partyline/partyline.keys.json >/dev/null <<'EOF'
 {"agent-a": "REPLACE-with-openssl-rand-hex-32", "agent-b": "REPLACE-too"}
 EOF
-sudo chmod 600 /etc/partyline/partyline.keys.json
-echo "REPLACE-with-openssl-rand-hex-32" | sudo tee /etc/partyline/agent-a.key >/dev/null
-sudo chmod 600 /etc/partyline/agent-a.key
+printf '%s' "REPLACE-with-openssl-rand-hex-32" | sudo tee /etc/partyline/agent-a.key >/dev/null
+
+# group-readable, not world-readable — 600 breaks the relay, 644 leaks the keys
+sudo chown root:partyline /etc/partyline/partyline.keys.json /etc/partyline/agent-a.key
+sudo chmod 0640 /etc/partyline/partyline.keys.json /etc/partyline/agent-a.key
 
 sudo cp config.env.example /etc/partyline/config.env && sudoedit /etc/partyline/config.env
-sudo cp deploy/partyline.service /etc/systemd/system/ && sudo systemctl enable --now partyline
-curl -s -H "Authorization: Bearer $(sudo cat /etc/partyline/agent-a.key)" \
-     http://127.0.0.1:8650/health
+sudo chown root:partyline /etc/partyline/config.env && sudo chmod 0640 /etc/partyline/config.env
+
+sudo cp deploy/partyline.service /etc/systemd/system/
+sudo systemctl enable --now partyline
 ```
 
-Then install `deploy/crontab.example`, point `WEBHOOK_URL` at whatever can wake your agent (with this
-repo's sibling project, a Hermes gateway route bound to a job; anything else that accepts an HMAC
-POST works), and send yourself a message:
+Check it is actually up, then send one message (`KEY` is read once so the token never lands in your
+shell history twice):
 
 ```bash
-curl -s -X POST http://127.0.0.1:8650/say \
-  -H "Authorization: Bearer $AGENT_B_KEY" -H 'Content-Type: application/json' \
+KEY=$(sudo cat /etc/partyline/agent-a.key)
+HDR="Authorization: Bearer $KEY"
+
+curl -s -H "$HDR" http://127.0.0.1:8650/health
+curl -s -X POST http://127.0.0.1:8650/say -H "$HDR" -H 'Content-Type: application/json' \
   -d '{"text":"what is the DNS record for the wiki?","thread":"dns"}'
 ```
+
+Then install `deploy/crontab.example` (as the `partyline` user — it sources the same config file), and
+point `WEBHOOK_URL` at whatever can wake your agent: a Hermes gateway route bound to a job, or anything
+else that accepts an HMAC-signed POST.
 
 ## The rules this code enforces
 
@@ -103,12 +118,14 @@ leaking *in message text* (nothing here redacts; that is the sender's job and yo
 ## Testing
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v   # 13 tests, real processes, no mocks
+python -m unittest discover -s tests -p "test_*.py" -v   # 17 tests, real processes, no mocks
 bash scripts/leak-scan.sh                                # refuse to publish private detail
 ```
 
 The tests start a real relay on a free port and a real HTTP sink for the webhook, then assert the
-signature, the allowlist refusal, fail-closed classification, the thread brake, and wake pacing.
+signature, the allowlist refusal, fail-closed classification, the thread brake, wake pacing, that a
+burst larger than `MAX_PER_RUN` loses nothing, and that a bad key or a dead webhook is loud rather than
+a quiet tick.
 
 ## Origin
 
